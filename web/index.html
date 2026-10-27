@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><title>Perfect Loop (web)</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+body{font:15px/1.5 system-ui,sans-serif;background:#0d0f14;color:#e8ecf3;max-width:720px;margin:0 auto;padding:24px 16px}
+.card{background:#151922;border:1px solid #232a38;border-radius:12px;padding:16px;margin-bottom:16px}
+label{display:inline-flex;gap:6px;align-items:center;margin:6px 12px 6px 0;color:#9aa5b8;font-size:13px}
+input,select,button{background:#1e2532;color:#e8ecf3;border:1px solid #2e3849;border-radius:8px;padding:7px 10px;font:inherit}
+input[type=number]{width:80px}button{cursor:pointer}button.p{background:#3b82f6;border-color:#3b82f6;font-weight:600}
+#log{font:12px ui-monospace,monospace;color:#7b879b;min-height:18px}h1{font-size:21px;margin:0 0 4px}h2{font-size:16px;margin:0 0 8px}
+</style></head><body>
+<h1>Perfect Loop</h1><p style="color:#8b95a7;margin-top:0">Make a click-free audio loop (WAV) and compute frame/timecode overlaps. Runs 100% in your browser.</p>
+
+<div class="card"><h2>1. Audio loop maker</h2>
+<input type="file" id="file" accept="audio/*,video/*"><br>
+<label>In (s)<input id="a" type="number" step="0.01" value="0"></label>
+<label>Out (s)<input id="b" type="number" step="0.01" value="0"></label>
+<label>Crossfade (s)<input id="x" type="number" step="0.01" value="0.25"></label>
+<label>Mode<select id="mode"><option value="crossfade">crossfade (seam-perfect)</option><option value="seamless">seamless (keeps length)</option></select></label><br>
+<button id="play">Preview</button> <button id="stop">Stop</button> <button class="p" id="dl">Download loop.wav</button>
+<div id="log">Load a file to begin.</div></div>
+
+<div class="card"><h2>2. Overlap calculator (for Premiere / HitFilm)</h2>
+<label>Frame rate<input id="fps" type="number" value="24"></label>
+<label>Overlap (frames)<input id="fr" type="number" value="15"></label>
+<div id="calc"></div></div>
+
+<script>
+const $=s=>document.querySelector(s), log=m=>$('#log').textContent=m;
+let ctx, src, loopBuf, node;
+const HP=Math.PI/2;
+$('#file').onchange=async e=>{
+  const f=e.target.files[0]; if(!f) return;
+  try{ ctx=ctx||new (window.AudioContext||window.webkitAudioContext)();
+    src=await ctx.decodeAudioData(await f.arrayBuffer());
+    $('#b').value=src.duration.toFixed(2); log(`${f.name}: ${src.duration.toFixed(2)}s, ${src.numberOfChannels}ch, ${src.sampleRate}Hz`);
+  }catch(err){ log('Could not decode audio: '+err.message); }
+};
+function build(){
+  if(!src) throw new Error('Load a file first.');
+  const sr=src.sampleRate, a=Math.round($('#a').value*sr), b=Math.min(src.length,Math.round($('#b').value*sr)), n=b-a;
+  if(n<=1) throw new Error('Out must be after In.');
+  const xf=Math.min(Math.round($('#x').value*sr), n>>1), seamless=$('#mode').value==='seamless';
+  const len=seamless?n:n-xf, out=ctx.createBuffer(src.numberOfChannels,len,sr);
+  for(let c=0;c<src.numberOfChannels;c++){
+    const s=src.getChannelData(c).subarray(a,b), d=out.getChannelData(c);
+    d.set(seamless?s:s.subarray(0,len));
+    if(seamless){ const k=Math.min(Math.round(.005*sr),n>>1);
+      for(let i=0;i<k;i++){const t=(i+.5)/k; d[i]*=Math.sin(t*HP); d[n-1-i]*=Math.cos(t*HP);} }
+    else for(let i=0;i<xf;i++){const t=(i+.5)/xf; d[i]=s[n-xf+i]*Math.cos(t*HP)+s[i]*Math.sin(t*HP);}
+  }
+  return out;
+}
+$('#play').onclick=()=>{ try{ if(node) node.stop(); loopBuf=build(); node=ctx.createBufferSource();
+  node.buffer=loopBuf; node.loop=true; node.connect(ctx.destination); node.start(); log(`Looping ${loopBuf.duration.toFixed(3)}s`);}catch(e){log(e.message);} };
+$('#stop').onclick=()=>{ if(node){node.stop(); node=null;} };
+$('#dl').onclick=()=>{ try{ const buf=build(), nch=buf.numberOfChannels, n=buf.length, bytes=n*nch*2, v=new DataView(new ArrayBuffer(44+bytes));
+  const w=(o,s)=>[...s].forEach((ch,i)=>v.setUint8(o+i,ch.charCodeAt(0)));
+  w(0,'RIFF'); v.setUint32(4,36+bytes,true); w(8,'WAVEfmt '); v.setUint32(16,16,true); v.setUint16(20,1,true); v.setUint16(22,nch,true);
+  v.setUint32(24,buf.sampleRate,true); v.setUint32(28,buf.sampleRate*nch*2,true); v.setUint16(32,nch*2,true); v.setUint16(34,16,true); w(36,'data'); v.setUint32(40,bytes,true);
+  let o=44; for(let i=0;i<n;i++) for(let c=0;c<nch;c++){ const x=Math.max(-1,Math.min(1,buf.getChannelData(c)[i])); v.setInt16(o,x*32767,true); o+=2; }
+  const a=document.createElement('a'); a.href=URL.createObjectURL(new Blob([v],{type:'audio/wav'})); a.download='loop.wav'; a.click(); log('Saved loop.wav');
+}catch(e){log(e.message);} };
+function calc(){ const f=+$('#fps').value||24, n=+$('#fr').value||0, s=n/f, p=x=>String(x).padStart(2,'0');
+  $('#calc').innerHTML=`${n} frames @ ${f} fps = <b>${s.toFixed(3)} s</b> = timecode <b>00:00:${p(Math.floor(s))}:${p(n%f)}</b><br>Put the transition length equal to this value; start the copy ${n} frames before the original ends.`; }
+['#fps','#fr'].forEach(i=>$(i).oninput=calc); calc();
+</script></body></html>
